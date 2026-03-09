@@ -1,0 +1,107 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+
+packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg2
+  - software-properties-common
+  - net-tools
+
+users:
+  - name: tuz
+    shell: /bin/bash
+    groups: [sudo]
+    sudo: ["ALL=(ALL:ALL) NOPASSWD:ALL"]
+
+runcmd:
+  - mkdir -p /home/tuz/.ssh
+  - touch /home/tuz/.ssh/authorized_keys
+  - chmod 700 /home/tuz/.ssh
+  - chmod 600 /home/tuz/.ssh/authorized_keys
+  - cp /root/.ssh/authorized_keys /home/tuz/.ssh/authorized_keys
+  - chown -R tuz:tuz /home/tuz/.ssh
+
+  - sed -i 's/^#Port 22/Port 8308/' /etc/ssh/sshd_config
+  - sed -i 's/^Port 22/Port 8308/' /etc/ssh/sshd_config
+  - sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+  - sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+  - sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+  - sed -i 's/^PermitRootLogin yes/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+  - echo "PermitRootLogin prohibit-password" >> /etc/ssh/sshd_config
+  - systemctl restart sshd
+
+  - |
+    cat > /etc/nftables.conf << EOF
+    #!/usr/sbin/nft -f
+
+    flush ruleset
+
+    table inet filter {
+        chain input {
+            type filter hook input priority 0; policy drop;
+
+            ct state established,related accept
+            iif lo accept
+            
+            tcp dport 8308 accept
+    
+            tcp dport { 6443, 2379, 2380, 10250, 10259, 10257 } accept
+    
+            tcp dport { 10250, 10256 } accept
+            tcp dport {	30000-32767 } accept
+            udp dport {	30000-32767 } accept
+    
+            tcp dport 8472 accept
+            udp dport 8472 accept
+            
+            icmp type echo-request accept
+            icmpv6 type echo-request accept
+        }
+        
+        chain forward {
+            type filter hook forward priority 0; policy drop;
+        }
+        
+        chain output {
+            type filter hook output priority 0; policy accept;
+        }
+    }
+    EOF
+
+  - systemctl enable nftables
+  - systemctl restart nftables
+
+  - |
+    cat > /etc/modules-load.d/k8s.conf << EOF
+    overlay
+    br_netfilter
+    EOF
+
+  - |
+    cat > /etc/sysctl.d/k8s.conf << EOF
+    net.bridge.bridge-nf-call-iptables  = 1
+    net.bridge.bridge-nf-call-ip6tables = 1
+    net.ipv4.ip_forward                 = 1
+    EOF
+
+  - mkdir -p /etc/apt/keyrings
+
+  - curl -fsSL https://download.opensuse.org/repositories/isv:/cri-o:/stable:/v1.35/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg
+  - echo "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://download.opensuse.org/repositories/isv:/cri-o:/stable:/v1.35/deb/ /" | tee /etc/apt/sources.list.d/cri-o.list
+
+  - curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.35/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  - echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.35/deb/ /" | tee /etc/apt/sources.list.d/kubernetes.list
+
+  - curl -fsSL https://packages.buildkite.com/helm-linux/helm-debian/gpgkey | gpg --dearmor | tee /usr/share/keyrings/helm.gpg > /dev/null
+  - echo "deb [signed-by=/usr/share/keyrings/helm.gpg] https://packages.buildkite.com/helm-linux/helm-debian/any/ any main" | tee /etc/apt/sources.list.d/helm-stable-debian.list
+
+  - apt update
+  - apt install -y kubelet kubeadm kubectl cri-o helm
+
+  - systemctl enable crio
+  - systemctl start crio
+
+  - systemctl enable kubelet
